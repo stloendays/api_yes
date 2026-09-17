@@ -14,10 +14,15 @@ import {
   collectCodexAsChat,
   streamCodexAsChat
 } from './provider/codex'
+import {
+  listAntigravityModels,
+  runAntigravityNonStream,
+  runAntigravityStream,
+  type AgyUsage
+} from './provider/antigravity-cli'
 
 const isWildcard = (host: string): boolean => host === '0.0.0.0' || host === '::'
 
-/** The machine's primary non-internal IPv4, for showing a reachable LAN address. */
 function primaryLanIPv4(): string | undefined {
   for (const list of Object.values(networkInterfaces())) {
     for (const ni of list ?? []) {
@@ -27,13 +32,11 @@ function primaryLanIPv4(): string | undefined {
   return undefined
 }
 
-/** True for loopback remote addresses (127.x, ::1, IPv4-mapped loopback). */
 function isLoopback(addr?: string): boolean {
   if (!addr) return false
   return addr === '::1' || addr === '::ffff:127.0.0.1' || addr.startsWith('127.')
 }
 
-// hop-by-hop headers never forwarded (RFC 7230) + ones fetch/undici manages itself
 const STRIP_REQ = new Set([
   'connection',
   'keep-alive',
@@ -51,8 +54,8 @@ const STRIP_RES = new Set([
   'connection',
   'keep-alive',
   'transfer-encoding',
-  'content-encoding', // we requested identity upstream, so the body is already plain
-  'content-length' // recomputed by Node as we stream
+  'content-encoding',
+  'content-length'
 ])
 
 const CORS = {
@@ -64,8 +67,8 @@ const CORS = {
 /**
  * The single local reverse-proxy server. A client points its OpenAI/Anthropic base URL at
  * http://host:port and authenticates with a proxy key; that key selects the endpoint → credential
- * → upstream. The request is forwarded with the real auth injected, the response is streamed back
- * verbatim, and token usage is parsed off a tee of the stream and billed to that endpoint.
+ * → upstream. AGY credentials use the same local-key gate but execute through the official AGY CLI
+ * session, so the upstream Google OAuth secret remains in the OS keyring owned by AGY.
  */
 export class ProxyServer {
   private server: Server | null = null
@@ -74,9 +77,6 @@ export class ProxyServer {
     this.status = { running: false, host: this.desiredHost(), port: core.store.data.settings.proxyPort }
   }
 
-  /** Bind host is DERIVED, not configured: 0.0.0.0 only when some enabled API key allows LAN (so it
-   *  can actually be reached), otherwise loopback-only. Per-key 403-gating still protects
-   *  loopback-only keys even when the socket is on 0.0.0.0. */
   private desiredHost(): string {
     const anyLan = this.core.store.data.proxies.some((p) => p.enabled && p.localOnly === false)
     return anyLan ? '0.0.0.0' : '127.0.0.1'
@@ -134,8 +134,6 @@ export class ProxyServer {
     return this.start()
   }
 
-  /** Re-derive host (credential exposure changed) / re-read port (settings changed): rebind only if
-   *  it actually changed; if stopped, just reflect the target so the UI's API address stays in sync. */
   async applySettings(): Promise<ProxyServerStatus> {
     const host = this.desiredHost()
     const port = this.core.store.data.settings.proxyPort
@@ -152,7 +150,6 @@ export class ProxyServer {
     return this.getStatus()
   }
 
-  // ── request handling ───────────────────────────────────────────────────────
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
 
@@ -161,7 +158,6 @@ export class ProxyServer {
       res.end()
       return
     }
-    // friendly root / health
     if (url.pathname === '/' || url.pathname === '/healthz') {
       res.writeHead(200, { 'content-type': 'application/json', ...CORS })
       res.end(JSON.stringify({ name: 'API-YES', ok: true, status: this.getStatus() }))
@@ -180,8 +176,6 @@ export class ProxyServer {
     if (!cred) return this.fail(res, 502, mt('proxy.credGone'))
     const provider = cred.provider
     if (cred.enabled === false) return this.fail(res, 403, mt('proxy.credDisabled'), provider)
-    // per-key exposure: a loopback-only key refuses non-loopback callers even when the server
-    // itself is bound to 0.0.0.0 (for other keys)
     if (endpoint.localOnly !== false && !isLoopback(req.socket.remoteAddress)) {
       return this.fail(res, 403, mt('proxy.localOnly'), provider)
     }
@@ -199,9 +193,18 @@ export class ProxyServer {
       return this.fail(res, 400, mt('proxy.readBodyFailed'), provider)
     }
 
-    // ChatGPT/Codex OAuth speaks ONLY the Responses API behind Cloudflare. Adapt the common
-    // OpenAI surfaces so ordinary clients work: translate /chat/completions → /responses, and serve
-    // a curated /models. (/responses passes through the generic path with Codex headers.)
+    // AGY is presented as an OpenAI-compatible local API, but its upstream execution is the
+    // official `agy` headless CLI using the user's cached OAuth session in the OS keyring.
+    if (cred.provider === 'antigravity') {
+      if (/(^|\/)models\/?$/.test(url.pathname)) return this.serveAntigravityModels(res)
+      if (/\/chat\/completions\/?$/.test(url.pathname)) {
+        return this.handleAntigravityChat(res, endpoint, rawBody)
+      }
+      return this.fail(res, 404, `AGY local API route not supported: ${url.pathname}`, 'antigravity')
+    }
+
+    // ChatGPT/Codex OAuth speaks ONLY the Responses API behind Cloudflare. Adapt common OpenAI
+    // surfaces so ordinary clients work.
     if (cred.provider === 'openai' && cred.kind === 'oauth') {
       if (/(^|\/)models\/?$/.test(url.pathname)) return this.serveCodexModels(res)
       if (/\/chat\/completions\/?$/.test(url.pathname)) {
@@ -216,7 +219,6 @@ export class ProxyServer {
       return this.fail(res, 502, errText(e), provider)
     }
 
-    // build upstream headers from the client's, minus hop-by-hop / dropped, plus our overrides
     const headers: Record<string, string> = {}
     for (const [k, v] of Object.entries(req.headers)) {
       const lk = k.toLowerCase()
@@ -227,9 +229,9 @@ export class ProxyServer {
     Object.assign(headers, target.setHeaders)
     for (const [k, v] of Object.entries(target.mergeHeaders ?? {})) {
       const lk = k.toLowerCase()
-      headers[lk] = mergeHeaderValue(headers[lk], v) // combine with the client's value, de-duped
+      headers[lk] = mergeHeaderValue(headers[lk], v)
     }
-    headers['accept-encoding'] = 'identity' // keep the body parseable for usage counting
+    headers['accept-encoding'] = 'identity'
 
     const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && rawBody.length > 0
     const sendBody = hasBody && target.transformBody ? target.transformBody(rawBody) : rawBody
@@ -246,7 +248,6 @@ export class ProxyServer {
       return this.fail(res, 502, `${mt('proxy.upstreamFailed', { e: errText(e) })} → ${target.url}`, provider)
     }
 
-    // forward status + headers
     const outHeaders: Record<string, string> = { ...CORS }
     upstream.headers.forEach((value, name) => {
       if (!STRIP_RES.has(name.toLowerCase())) outHeaders[name] = value
@@ -254,12 +255,6 @@ export class ProxyServer {
     res.writeHead(upstream.status, outHeaders)
 
     const contentType = upstream.headers.get('content-type') ?? ''
-    // We inject stream_options.include_usage into OpenAI chat requests the client didn't ask for, so
-    // the upstream now emits a terminal "usage-only" chunk (choices:[] + usage). Strip that chunk back
-    // out before forwarding (we still meter it) so the client sees exactly the stream it would have
-    // gotten without our injection — some clients otherwise re-render the whole answer on that extra
-    // chunk. "We injected" ⇔ the body was rewritten (openaiUsageTransform returns the SAME buffer when
-    // it doesn't touch it); a client that set include_usage itself isn't rewritten → passes through.
     const stripInjectedUsage =
       upstream.ok &&
       cred.provider === 'openai' &&
@@ -267,10 +262,6 @@ export class ProxyServer {
       sendBody !== rawBody &&
       contentType.includes('text/event-stream')
 
-    // Meter usage off a tee of the stream. The meter yields CUMULATIVE snapshots; we bill the DELTA
-    // each time it advances. Providers that report usage continuously (Anthropic message_delta, vLLM
-    // continuous_usage_stats) meter live — a mid-stream disconnect still bills what arrived — while
-    // providers that emit usage only at the end just bill once. No upstream usage → nothing billed.
     const meter = upstream.ok ? createUsageMeter(cred.provider, contentType) : null
     const dec = new TextDecoder()
     const enc = stripInjectedUsage ? new TextEncoder() : null
@@ -303,8 +294,6 @@ export class ProxyServer {
         /* usage is best-effort */
       }
     }
-    // strip mode: forward complete SSE lines, dropping our injected usage-only chunk; keep the partial
-    // trailing line in `fwd` for the next read. Re-encoding decoded UTF-8 text round-trips byte-for-byte.
     let fwd = ''
     const forwardFiltered = (text: string, flush: boolean): void => {
       if (!enc) return
@@ -347,15 +336,12 @@ export class ProxyServer {
       } catch {
         /* client disconnected mid-stream — keep whatever we already billed */
       }
-      // flush the decoder tail through the same meter + (in strip mode) drop filter
       const tail = dec.decode()
       meterText(tail)
       if (stripInjectedUsage) forwardFiltered(tail, true)
     }
     res.end()
 
-    // finalize the parser, then count the request once (a request that produced no parseable usage
-    // isn't counted, matching the per-token meters).
     if (meter) {
       try {
         commit(meter.end())
@@ -363,8 +349,6 @@ export class ProxyServer {
         /* usage is best-effort */
       }
       if (billedAny) {
-        // attribute the per-model breakdown once, with the resolved model + this request's totals,
-        // so byModel stays consistent with the top-level counters even if early chunks lacked a model
         this.billRequest(endpoint.id, billModel, {
           inputTokens: committed.inputTokens,
           outputTokens: committed.outputTokens
@@ -373,15 +357,150 @@ export class ProxyServer {
     }
   }
 
-  /** Serve the curated Codex model set as an OpenAI /models list (Codex has no list endpoint). */
+  private async serveAntigravityModels(res: ServerResponse): Promise<void> {
+    const r = await listAntigravityModels()
+    if (!r.ok) return this.fail(res, 502, r.message, 'antigravity')
+    const data = r.models.map((m) => ({ id: m.id, object: 'model', owned_by: 'google-antigravity' }))
+    res.writeHead(200, { 'content-type': 'application/json', ...CORS })
+    res.end(JSON.stringify({ object: 'list', data }))
+  }
+
+  private async handleAntigravityChat(
+    res: ServerResponse,
+    endpoint: ProxyEndpoint,
+    rawBody: Buffer
+  ): Promise<void> {
+    let chat: Record<string, unknown>
+    try {
+      chat = JSON.parse(rawBody.toString('utf8')) as Record<string, unknown>
+    } catch {
+      return this.fail(res, 400, mt('proxy.badJson'), 'antigravity')
+    }
+    const model = typeof chat.model === 'string' && chat.model.trim() ? chat.model : 'antigravity-default'
+    const wantStream = chat.stream === true
+
+    if (!wantStream) {
+      try {
+        const out = await runAntigravityNonStream(chat)
+        const body = {
+          id: `chatcmpl-agy-${Date.now()}`,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: out.text },
+              finish_reason: 'stop'
+            }
+          ],
+          usage: {
+            prompt_tokens: out.usage.inputTokens,
+            completion_tokens: out.usage.outputTokens,
+            total_tokens: out.usage.inputTokens + out.usage.outputTokens,
+            prompt_tokens_details: { cached_tokens: out.usage.cachedTokens },
+            completion_tokens_details: { reasoning_tokens: out.usage.reasoningTokens }
+          }
+        }
+        res.writeHead(200, { 'content-type': 'application/json', ...CORS })
+        res.end(JSON.stringify(body))
+        this.billAgy(endpoint.id, model, out.usage)
+        return
+      } catch (e) {
+        return this.fail(res, 502, `AGY request failed: ${errText(e)}`, 'antigravity')
+      }
+    }
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+      ...CORS
+    })
+    const id = `chatcmpl-agy-${Date.now()}`
+    const created = Math.floor(Date.now() / 1000)
+    const send = (obj: unknown): void => {
+      if (!res.destroyed) res.write(`data: ${JSON.stringify(obj)}\n\n`)
+    }
+    send({
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+    })
+
+    let child: { kill: () => boolean } | undefined
+    const onClose = (): void => {
+      if (!res.writableEnded) child?.kill()
+    }
+    res.once('close', onClose)
+    try {
+      const usage = await runAntigravityStream(
+        chat,
+        (delta) =>
+          send({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{ index: 0, delta: { content: delta }, finish_reason: null }]
+          }),
+        (p) => {
+          child = p
+        }
+      )
+      if (!res.destroyed) {
+        send({
+          id,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+        })
+        const streamOptions = chat.stream_options as Record<string, unknown> | undefined
+        if (streamOptions?.include_usage === true) {
+          send({
+            id,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [],
+            usage: {
+              prompt_tokens: usage.inputTokens,
+              completion_tokens: usage.outputTokens,
+              total_tokens: usage.inputTokens + usage.outputTokens,
+              prompt_tokens_details: { cached_tokens: usage.cachedTokens },
+              completion_tokens_details: { reasoning_tokens: usage.reasoningTokens }
+            }
+          })
+        }
+        res.write('data: [DONE]\n\n')
+        res.end()
+      }
+      this.billAgy(endpoint.id, model, usage)
+    } catch (e) {
+      if (!res.destroyed) {
+        send({ error: { message: `AGY request failed: ${errText(e)}`, type: 'api_yes_proxy_error' } })
+        res.write('data: [DONE]\n\n')
+        res.end()
+      }
+    } finally {
+      res.off('close', onClose)
+    }
+  }
+
+  private billAgy(proxyId: string, model: string, usage: AgyUsage): void {
+    this.bill(proxyId, { ...usage, model })
+  }
+
   private serveCodexModels(res: ServerResponse): void {
     const data = codexModels(this.core).map((id) => ({ id, object: 'model', owned_by: 'openai' }))
     res.writeHead(200, { 'content-type': 'application/json', ...CORS })
     res.end(JSON.stringify({ object: 'list', data }))
   }
 
-  /** Translate an OpenAI Chat Completions request into a Codex /responses call and stream the
-   *  result back as chat.completion (chunks if the client asked to stream, else one object). */
   private async handleCodexChat(
     res: ServerResponse,
     cred: StoredCredential,
@@ -395,7 +514,6 @@ export class ProxyServer {
       return this.fail(res, 400, mt('proxy.badJson'), 'openai')
     }
     const wantStream = chat.stream === true
-    // no model in the request → first entry of the curated list (Codex-priority order, never empty)
     const model = typeof chat.model === 'string' ? chat.model : codexModels(this.core)[0]
 
     let token: string
@@ -444,8 +562,6 @@ export class ProxyServer {
     }
   }
 
-  /** Add token deltas to an endpoint's TOP-LEVEL meters (no request/byModel) and push the live total
-   *  to the UI. Called repeatedly across a stream as the upstream's cumulative usage advances. */
   private billTokens(
     proxyId: string,
     delta: { inputTokens: number; outputTokens: number; cachedTokens: number; reasoningTokens: number }
@@ -464,8 +580,6 @@ export class ProxyServer {
     if (updated) this.core.broadcast('proxy.usage', { proxyId, usage: updated.usage })
   }
 
-  /** Count one request against an endpoint (once, after its usage settled) and fold this request's
-   *  totals into the per-model breakdown — done here, not per-chunk, so byModel matches top-level. */
   private billRequest(
     proxyId: string,
     model?: string,
@@ -477,8 +591,6 @@ export class ProxyServer {
       if (!p) return
       p.usage.requests += 1
       if (model) {
-        // usageBucket, not `??=`: the model id is upstream-controlled ("__proto__" must not
-        // write through to Object.prototype)
         const m = usageBucket(p.usage.byModel, model)
         m.requests += 1
         if (totals) {
@@ -486,15 +598,12 @@ export class ProxyServer {
           m.outputTokens += totals.outputTokens
         }
       }
-      // the permanent daily ledger (per endpoint + per credential) — unlike the counters above it
-      // survives usage resets, so "what ran on which day" stays answerable long-term
       recordDailyUsage(db, p.credentialId, p.id, model, totals ?? { inputTokens: 0, outputTokens: 0 })
       updated = p
     })
     if (updated) this.core.broadcast('proxy.usage', { proxyId, usage: updated.usage })
   }
 
-  /** One-shot bill (tokens + request) for the Codex path, whose usage is known only at the end. */
   private bill(
     proxyId: string,
     usage: { inputTokens: number; outputTokens: number; cachedTokens: number; reasoningTokens: number; model?: string }
@@ -503,11 +612,8 @@ export class ProxyServer {
     this.billRequest(proxyId, usage.model, { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens })
   }
 
-  /** Emit an error in the provider's native shape so the client surfaces the real message
-   *  (Anthropic SDKs read {type:'error',error:{message}}; OpenAI SDKs read {error:{message}}). */
   private fail(res: ServerResponse, status: number, message: string, provider?: Provider): void {
     console.warn(`[proxy] ${status}: ${message}`)
-    // surface server-side failures in the app window too, so debugging needs no terminal
     if (status >= 500) this.core.broadcast('toast', { kind: 'error', message: mt('proxy.toast', { status, message }) })
     const body =
       provider === 'anthropic'
@@ -518,7 +624,6 @@ export class ProxyServer {
   }
 }
 
-/** Readable error text including a fetch failure's underlying cause (ECONNREFUSED / ENOTFOUND / …). */
 function errText(e: unknown): string {
   if (e instanceof Error) {
     const cause = (e as { cause?: unknown }).cause
@@ -528,9 +633,6 @@ function errText(e: unknown): string {
   return String(e)
 }
 
-/** True for an OpenAI streaming "usage-only" SSE line: `data: {choices:[], usage:{…}}`. That's the
- *  chunk our injected stream_options.include_usage makes the upstream emit; we meter it but drop it
- *  from the client stream so the client sees the stream it would have without our injection. */
 function isUsageOnlyDataLine(rawLine: string): boolean {
   const line = rawLine.trim()
   if (!line.startsWith('data:')) return false

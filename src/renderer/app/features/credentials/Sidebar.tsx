@@ -18,12 +18,11 @@ interface CtxMenu {
   y: number
 }
 
-// ----- resizable / collapsible sidebar (persisted, springy Q弹 settle) -----
 const WIDTH_KEY = 'api-yes-sidebar-width'
 const COLLAPSED_KEY = 'api-yes-sidebar-collapsed'
 const MIN_W = 220
 const MAX_W = 560
-const DEFAULT_W = 288 // the old w-72
+const DEFAULT_W = 288
 const COLLAPSED_W = 64
 const clampW = (w: number): number => Math.max(MIN_W, Math.min(MAX_W, w))
 const readWidth = (): number => {
@@ -32,10 +31,10 @@ const readWidth = (): number => {
 }
 const readCollapsed = (): boolean => localStorage.getItem(COLLAPSED_KEY) === '1'
 
-// collapsed-rail wash per provider (badges.tsx owns the chip styles; only a tint is needed here)
 const providerTint: Record<Provider, string> = {
   openai: 'bg-marker-sky/20',
-  anthropic: 'bg-marker-knot/15'
+  anthropic: 'bg-marker-knot/15',
+  antigravity: 'bg-marker-violet/10'
 }
 
 function arraysEqual(a: string[], b: string[]): boolean {
@@ -61,7 +60,6 @@ function Chevron({ dir }: { dir: 'left' | 'right' }): JSX.Element {
   )
 }
 
-/** The left list of credentials. Click to open; right-click for a quick menu (test/rename/delete). */
 export function Sidebar(): JSX.Element {
   const credentials = useStore((s) => s.credentials)
   const selectedId = useStore((s) => s.selectedId)
@@ -73,7 +71,6 @@ export function Sidebar(): JSX.Element {
   const reloadCredentials = useStore((s) => s.reloadCredentials)
   const t = useT()
   const [adding, setAdding] = useState(false)
-  // the app-level (all credentials rolled up) usage-history dialog
   const [usageOpen, setUsageOpen] = useState(false)
   const [menu, setMenu] = useState<CtxMenu | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
@@ -113,9 +110,6 @@ export function Sidebar(): JSX.Element {
     [credentialById, orderedIds]
   )
 
-  // Width is spring-driven by direct DOM mutation; React only re-renders on collapse toggle.
-  // NOTE: only style.width is ever animated — never a transform — because the context menu and
-  // AddCredentialDialog are position:fixed children and a transformed ancestor would trap them.
   const [collapsed, setCollapsed] = useState(readCollapsed)
   const collapsedRef = useRef(collapsed)
   const userWidth = useRef(readWidth())
@@ -130,7 +124,6 @@ export function Sidebar(): JSX.Element {
     min: MIN_W,
     max: MAX_W,
     onSettle: (w) => {
-      // a collapse/expand settle must not clobber the remembered user width
       if (collapsedRef.current) return
       userWidth.current = clampW(w)
       localStorage.setItem(WIDTH_KEY, String(userWidth.current))
@@ -139,8 +132,6 @@ export function Sidebar(): JSX.Element {
   const toggleCollapsed = (): void => {
     const next = !collapsedRef.current
     if (next) {
-      // commit the LIVE width before collapsing: a just-released drag may still be mid-settle,
-      // and its onSettle (the normal commit point) is skipped once collapsedRef flips
       userWidth.current = clampW(getWidth())
       localStorage.setItem(WIDTH_KEY, String(userWidth.current))
     }
@@ -150,10 +141,6 @@ export function Sidebar(): JSX.Element {
     animateTo(next ? COLLAPSED_W : userWidth.current)
   }
 
-  // Close the menu on any outside press / escape / scroll / resize. Crucially, the close listeners
-  // are attached on the NEXT tick: otherwise the very gesture that opened the menu (a contextmenu
-  // event still bubbling to window) would immediately close it again — which made the 2nd+
-  // right-click look completely dead.
   useEffect(() => {
     if (!menu) return
     const close = (): void => setMenu(null)
@@ -179,7 +166,6 @@ export function Sidebar(): JSX.Element {
 
   const openMenu = (e: React.MouseEvent, id: string, name: string): void => {
     e.preventDefault()
-    // keep this gesture from reaching the window close-listeners (re-open race)
     e.stopPropagation()
     select(id)
     setMenu({ id, name, x: e.clientX, y: e.clientY })
@@ -266,7 +252,6 @@ export function Sidebar(): JSX.Element {
       ) : (
         <div className="flex items-center gap-1.5 px-4 pb-2 pt-4">
           <h2 className="min-w-0 flex-1 truncate font-doodle text-lg font-bold">
-            {/* the heading doubles as the entry to the app-wide usage history */}
             <button
               type="button"
               title={t('sidebar.usageTitle')}
@@ -295,10 +280,7 @@ export function Sidebar(): JSX.Element {
 
       <div
         ref={listRef}
-        className={`relative min-h-0 flex-1 overflow-y-auto pb-4 ${
-          // pt-1 keeps the first mini-square's overhanging status dot inside the scroll clip box
-          collapsed ? 'px-2 pt-1' : 'px-3'
-        }`}
+        className={`relative min-h-0 flex-1 overflow-y-auto pb-4 ${collapsed ? 'px-2 pt-1' : 'px-3'}`}
       >
         {!collapsed && credentials.length === 0 && (
           <div className="mt-10 whitespace-pre-line px-3 text-center font-doodle text-sm leading-relaxed opacity-50">
@@ -347,7 +329,6 @@ export function Sidebar(): JSX.Element {
                         : `border-ink/25 hover:border-ink/60 ${providerTint[c.provider]}`
                     } ${c.enabled ? '' : 'opacity-55'} ${dragging ? 'border-ink bg-card shadow-lg' : ''}`}
                   >
-                    {/* first character stands in for the name; spread handles astral glyphs/emoji */}
                     {[...c.name.trim()][0] ?? '·'}
                     <span className="absolute -right-1 -top-1 flex">
                       <StatusDot ok={c.lastTest?.ok} />
@@ -382,9 +363,6 @@ export function Sidebar(): JSX.Element {
         </Reorder.Group>
       </div>
 
-      {/* width drag handle — a wide invisible hit zone straddling the right border, with a small
-          visible "white fry" capsule. z-[45] keeps it above the doodle scrollthumb (z-40) but
-          below shared modal shells (z-50), so dialogs can cover it cleanly. */}
       {!collapsed && (
         <div
           onPointerDown={startResize}
@@ -395,7 +373,6 @@ export function Sidebar(): JSX.Element {
         </div>
       )}
 
-      {/* right-click context menu */}
       {menu && (
         <div
           className="fixed z-[85] min-w-[140px] rounded-[10px] border-2 border-ink bg-card p-1 font-doodle shadow-md"

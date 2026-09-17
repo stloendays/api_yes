@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { clipboard } from 'electron'
-import { emptyUsage, type ProxyEndpoint } from '@shared/types'
+import { emptyUsage, type Provider, type ProxyEndpoint } from '@shared/types'
 import type { AppCore } from './context'
 import type { ProxyServer } from './proxy-server'
 import { getProxyLeaf } from './usage-history'
@@ -16,7 +16,7 @@ function keyTaken(core: AppCore, key: string, exceptId?: string): boolean {
   return core.store.data.proxies.some((p) => p.key === key && p.id !== exceptId)
 }
 
-function uniqueGeneratedKey(core: AppCore, provider: 'openai' | 'anthropic'): string {
+function uniqueGeneratedKey(core: AppCore, provider: Provider): string {
   let key = generateProxyKey(provider)
   while (keyTaken(core, key)) key = generateProxyKey(provider)
   return key
@@ -33,15 +33,11 @@ function proxyById(core: AppCore, id: string): ProxyEndpoint {
 }
 
 export function registerProxyService(core: AppCore, server: ProxyServer): void {
-  // notify the renderer AND re-apply the bind (a key's exposure may have changed → the derived
-  // host may need to flip; applySettings only rebinds when it actually changed).
   const changed = (): void => {
     core.broadcast('proxies.changed', sorted(core))
     void server.applySettings()
   }
 
-  // the bind host is derived from API-key exposure + the port from settings; re-apply on settings
-  // or credential (enable) changes too.
   core.events.on('settings.changed', () => void server.applySettings())
   core.events.on('credentials.changed', () => void server.applySettings())
 
@@ -88,7 +84,6 @@ export function registerProxyService(core: AppCore, server: ProxyServer): void {
       if (!p) return
       if (patch.name !== undefined) {
         p.name = patch.name.trim() || p.name
-        // keep the history record's display name in step with the live entity
         const leaf = getProxyLeaf(db.usageHistory, p.credentialId, p.id)
         if (leaf) leaf.name = p.name
       }
@@ -108,11 +103,9 @@ export function registerProxyService(core: AppCore, server: ProxyServer): void {
 
   core.commands.register('proxies.delete', ({ id }) => {
     core.store.mutate((db) => {
-      // locate the history leaf via the entity's credentialId BEFORE the entity disappears
       const p = db.proxies.find((x) => x.id === id)
       db.proxies = db.proxies.filter((x) => x.id !== id)
       normalizeSameProxyKeyState(db.proxies)
-      // the daily ledger survives as a tombstone — the credential's total must not change here
       const leaf = p ? getProxyLeaf(db.usageHistory, p.credentialId, p.id) : undefined
       if (leaf) leaf.deleted = true
     })

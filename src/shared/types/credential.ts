@@ -3,7 +3,7 @@ import type { CredentialKind, Id, Provider, TestResult } from './common'
 /** OAuth subscription account info surfaced to the UI (never the tokens themselves). */
 export interface OAuthAccount {
   email?: string
-  /** e.g. "Claude Pro", "Claude Max", "ChatGPT Plus" */
+  /** e.g. "Claude Pro", "Claude Max", "ChatGPT Plus", "Google / Antigravity" */
   plan?: string
   organization?: string
 }
@@ -28,7 +28,7 @@ export interface CredentialView {
   name: string
   provider: Provider
   kind: CredentialKind
-  /** upstream base URL (e.g. https://api.openai.com/v1 or https://api.anthropic.com) */
+  /** upstream base URL */
   baseUrl: string
   /** apikey only: masked preview like "sk-…AB12" */
   keyPreview?: string
@@ -62,5 +62,6 @@ export type ApiKeyDraft = NewApiKeyCredential
 /** Default upstream base URLs per provider, offered as the placeholder/initial value. */
 export const DEFAULT_BASE_URL: Record<Provider, string> = {
   openai: 'https://api.openai.com/v1',
-  anthropic: 'https://api.anthropic.com'
+  anthropic: 'https://api.anthropic.com',
+  antigravity: 'https://daily-cloudcode-pa.googleapis.com'
 }

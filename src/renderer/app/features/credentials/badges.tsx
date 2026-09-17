@@ -3,9 +3,14 @@ import { useT } from '../../lib/i18n'
 
 const providerStyle: Record<Provider, string> = {
   openai: 'bg-marker-sky/30 border-marker-sky text-[#0b6b62]',
-  anthropic: 'bg-marker-knot/20 border-marker-knot text-[#b3431f]'
+  anthropic: 'bg-marker-knot/20 border-marker-knot text-[#b3431f]',
+  antigravity: 'bg-marker-violet/15 border-marker-violet text-[#6650a4]'
 }
-const providerLabel: Record<Provider, string> = { openai: 'OpenAI', anthropic: 'Anthropic' }
+const providerLabel: Record<Provider, string> = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  antigravity: 'AGY'
+}
 
 export function ProviderBadge({ provider }: { provider: Provider }): JSX.Element {
   return (

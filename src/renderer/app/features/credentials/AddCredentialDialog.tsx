@@ -74,7 +74,6 @@ export function AddCredentialDialog({
   const [oauthMsg, setOauthMsg] = useState('')
   const [pasteCode, setPasteCode] = useState('')
 
-  // reset everything when (re)opened
   useEffect(() => {
     if (open) {
       setProvider('openai')
@@ -90,14 +89,18 @@ export function AddCredentialDialog({
     }
   }, [open])
 
-  // keep baseUrl placeholder in step with provider until user edits
   const switchProvider = (p: Provider): void => {
     setProvider(p)
     setBaseUrl(DEFAULT_BASE_URL[p])
+    if (p === 'antigravity') {
+      setMethod('oauth')
+      setApiKey('')
+    }
     setTestResult(null)
     void cancelOAuth()
   }
   const switchMethod = (m: Method): void => {
+    if (provider === 'antigravity') return
     setMethod(m)
     setTestResult(null)
     void cancelOAuth()
@@ -111,7 +114,6 @@ export function AddCredentialDialog({
     }
   }
 
-  // listen for oauth progress for the active session
   useEffect(() => {
     if (!session) return
     return api.on('oauth.status', (s) => {
@@ -164,20 +166,21 @@ export function AddCredentialDialog({
       setOauthMsg(r.message)
       setOauthPhase('error')
     }
-    // success path is handled by the oauth.status listener
   }
 
   const canTest = !testing && !!baseUrl.trim() && !!apiKey.trim()
   const canSave = !saving && !!apiKey.trim() && !!baseUrl.trim()
+  const namePlaceholder =
+    provider === 'openai'
+      ? t('add.namePlaceholderOpenai')
+      : provider === 'anthropic'
+        ? t('add.namePlaceholderAnthropic')
+        : 'My AGY account'
 
   return (
-    <DialogShell open={open} onClose={onClose} title={t('add.title')} width="w-[26rem]">
+    <DialogShell open={open} onClose={onClose} title={t('add.title')} width="w-[30rem]">
       <Field label={t('add.nameOptional')}>
-        <DoodleInput
-          value={name}
-          placeholder={provider === 'openai' ? t('add.namePlaceholderOpenai') : t('add.namePlaceholderAnthropic')}
-          onChange={(e) => setName(e.target.value)}
-        />
+        <DoodleInput value={name} placeholder={namePlaceholder} onChange={(e) => setName(e.target.value)} />
       </Field>
 
       <div className="grid grid-cols-2 gap-3">
@@ -188,7 +191,8 @@ export function AddCredentialDialog({
             onChange={switchProvider}
             options={[
               { value: 'openai', label: 'OpenAI' },
-              { value: 'anthropic', label: 'Anthropic' }
+              { value: 'anthropic', label: 'Anthropic' },
+              { value: 'antigravity', label: 'AGY' }
             ]}
           />
         </div>
@@ -197,10 +201,14 @@ export function AddCredentialDialog({
           <Segmented
             value={method}
             onChange={switchMethod}
-            options={[
-              { value: 'oauth', label: t('add.methodOauth') },
-              { value: 'apikey', label: t('add.methodApikey') }
-            ]}
+            options={
+              provider === 'antigravity'
+                ? [{ value: 'oauth', label: 'AGY OAuth' }]
+                : [
+                    { value: 'oauth', label: t('add.methodOauth') },
+                    { value: 'apikey', label: t('add.methodApikey') }
+                  ]
+            }
           />
         </div>
       </div>
@@ -237,22 +245,28 @@ export function AddCredentialDialog({
       ) : (
         <div className="flex flex-col gap-3">
           <div className="rounded-[10px] border-2 border-ink/25 p-3 text-sm leading-relaxed opacity-80">
-            {provider === 'anthropic' ? t('add.oauthAnthropicDesc') : t('add.oauthOpenaiDesc')}
+            {provider === 'anthropic'
+              ? t('add.oauthAnthropicDesc')
+              : provider === 'antigravity'
+                ? 'Uses the official AGY CLI OAuth session. API-YES opens AGY in a terminal; AGY opens Google sign-in in your browser and keeps the upstream OAuth credential in your OS keyring. API-YES then exposes a separate agy-proxy-… local key.'
+                : t('add.oauthOpenaiDesc')}
           </div>
 
           {!session ? (
             <DoodleButton variant="primary" onClick={() => void beginOAuth()}>
-              {t('add.openBrowser')}
+              {provider === 'antigravity' ? 'Open AGY sign-in' : t('add.openBrowser')}
             </DoodleButton>
           ) : (
             <div className="flex flex-col gap-2">
-              <button
-                onClick={() => void api.command('shell.openExternal', { url: session.url })}
-                className="truncate text-left text-xs text-marker-blue underline"
-                title={session.url}
-              >
-                {t('add.manualOpen')}
-              </button>
+              {provider !== 'antigravity' && (
+                <button
+                  onClick={() => void api.command('shell.openExternal', { url: session.url })}
+                  className="truncate text-left text-xs text-marker-blue underline"
+                  title={session.url}
+                >
+                  {t('add.manualOpen')}
+                </button>
+              )}
 
               {session.mode === 'paste' && (
                 <>
@@ -276,7 +290,11 @@ export function AddCredentialDialog({
 
               {session.mode === 'loopback' && (
                 <div className="text-sm opacity-70">
-                  {oauthPhase === 'exchanging' ? t('add.verifying') : t('add.loopbackWaiting')}
+                  {provider === 'antigravity'
+                    ? 'Waiting for the AGY terminal/browser sign-in to finish…'
+                    : oauthPhase === 'exchanging'
+                      ? t('add.verifying')
+                      : t('add.loopbackWaiting')}
                 </div>
               )}
 

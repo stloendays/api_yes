@@ -1,8 +1,8 @@
 export type Id = string
 
-/** The two API "shapes" API-YES understands. The proxy is format-preserving: an OpenAI
- *  credential exposes an OpenAI-format endpoint, an Anthropic one an Anthropic-format endpoint. */
-export type Provider = 'openai' | 'anthropic'
+/** API shapes/provider families understood by API-YES. Antigravity is exposed locally through an
+ * OpenAI-compatible surface, while its upstream wire format is Google Cloud Code Assist. */
+export type Provider = 'openai' | 'anthropic' | 'antigravity'
 
 /** How a credential authenticates upstream. */
 export type CredentialKind = 'oauth' | 'apikey'
@@ -29,5 +29,6 @@ export interface ModelInfo {
 
 export const PROVIDER_LABEL: Record<Provider, string> = {
   openai: 'OpenAI',
-  anthropic: 'Anthropic'
+  anthropic: 'Anthropic',
+  antigravity: 'AGY / Antigravity'
 }

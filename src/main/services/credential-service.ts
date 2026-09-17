@@ -9,6 +9,7 @@ import {
   type StoredCredential
 } from './store'
 import { fetchUsage, listModels, testCredential } from './provider/upstream'
+import { antigravityUsageReport, listAntigravityModels, testAntigravityCli } from './provider/antigravity-cli'
 import { mt } from './i18n'
 
 function views(core: AppCore): CredentialView[] {
@@ -17,8 +18,6 @@ function views(core: AppCore): CredentialView[] {
 }
 
 function broadcastCredentials(core: AppCore): void {
-  // emit (not broadcast) so main-side listeners — e.g. the proxy server reacting to an exposure
-  // change — fire too; context.ts mirrors every event to the renderer, so the UI still updates.
   core.events.emit('credentials.changed', views(core))
 }
 
@@ -45,6 +44,9 @@ export function registerCredentialService(core: AppCore): void {
   })
 
   core.commands.register('credentials.createApiKey', (input) => {
+    if (input.provider === 'antigravity') {
+      throw new Error('AGY uses the official CLI OAuth session. Sign in with AGY instead of pasting an API key.')
+    }
     const now = Date.now()
     const order = core.store.data.credentials.reduce((m, c) => Math.max(m, c.order), -1) + 1
     const cred: StoredCredential = {
@@ -74,7 +76,6 @@ export function registerCredentialService(core: AppCore): void {
       if (!c) return
       if (patch.name !== undefined) {
         c.name = patch.name.trim() || c.name
-        // keep the history record's display name in step with the live entity
         const node = getCredentialNode(db.usageHistory, id)
         if (node) node.name = c.name
       }
@@ -138,8 +139,6 @@ export function registerCredentialService(core: AppCore): void {
       const gone = db.proxies.filter((p) => p.credentialId === id)
       db.proxies = db.proxies.filter((p) => p.credentialId !== id)
       removedProxies = gone.length > 0
-      // the daily ledgers survive as tombstones — app totals must not change on entity deletion;
-      // the keys die with the credential, so their leaves tombstone too
       const node = getCredentialNode(db.usageHistory, id)
       if (node) {
         node.deleted = true
@@ -164,7 +163,7 @@ export function registerCredentialService(core: AppCore): void {
   core.commands.register('credentials.test', async ({ id }) => {
     const c = core.store.data.credentials.find((x) => x.id === id)
     if (!c) throw new Error(mt('err.credNotFound'))
-    const result = await testCredential(core, c)
+    const result = c.provider === 'antigravity' ? await testAntigravityCli() : await testCredential(core, c)
     core.store.mutate((db) => {
       const x = db.credentials.find((y) => y.id === id)
       if (x) x.lastTest = result
@@ -174,6 +173,9 @@ export function registerCredentialService(core: AppCore): void {
   })
 
   core.commands.register('credentials.testDraft', async ({ draft }) => {
+    if (draft.provider === 'antigravity') {
+      return { ok: false, at: Date.now(), message: 'AGY credentials are created through browser/CLI sign-in.' }
+    }
     const ephemeral: StoredCredential = {
       id: randomUUID(),
       name: draft.name,
@@ -191,12 +193,12 @@ export function registerCredentialService(core: AppCore): void {
   core.commands.register('credentials.listModels', async ({ id }) => {
     const c = core.store.data.credentials.find((x) => x.id === id)
     if (!c) throw new Error(mt('err.credNotFound'))
-    return listModels(core, c)
+    return c.provider === 'antigravity' ? listAntigravityModels() : listModels(core, c)
   })
 
   core.commands.register('credentials.usage', async ({ id }) => {
     const c = core.store.data.credentials.find((x) => x.id === id)
     if (!c) throw new Error(mt('err.credNotFound'))
-    return fetchUsage(core, c)
+    return c.provider === 'antigravity' ? antigravityUsageReport() : fetchUsage(core, c)
   })
 }
