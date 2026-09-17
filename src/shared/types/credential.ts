@@ -64,3 +64,11 @@ export const DEFAULT_BASE_URL: Record<Provider, string> = {
   openai: 'https://api.openai.com/v1',
   anthropic: 'https://api.anthropic.com'
 }
+
+/**
+ * Google Antigravity local bridges expose an OpenAI-compatible API on this conventional address.
+ * API-YES treats AGY Local as an OpenAI-compatible upstream, so the existing streaming proxy,
+ * model discovery, usage metering, and per-proxy-key controls work without a separate wire format.
+ */
+export const AGY_LOCAL_BASE_URL = 'http://127.0.0.1:11435/v1'
+export const AGY_LOCAL_API_KEY = 'local'
