@@ -12,12 +12,14 @@ function rand(n: number): string {
 }
 
 /**
- * Generate a LOCAL proxy key styled to match the provider, so it looks at home in the user's tool
- * config. These gate access to the local proxy only — they are not upstream secrets.
- *   openai    → sk-proj-<48>
- *   anthropic → sk-ant-api03-<86>AA
+ * Generate a LOCAL proxy key styled to match the provider. These keys authenticate only to the
+ * API-YES localhost gateway; upstream OAuth/API secrets are never exposed to clients.
+ *   openai       → sk-proj-<48>
+ *   anthropic    → sk-ant-api03-<86>AA
+ *   antigravity  → agy-proxy-<48>
  */
 export function generateProxyKey(provider: Provider): string {
   if (provider === 'anthropic') return `sk-ant-api03-${rand(86)}AA`
+  if (provider === 'antigravity') return `agy-proxy-${rand(48)}`
   return `sk-proj-${rand(48)}`
 }
