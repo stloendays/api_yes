@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { OAuthStatus } from '@shared/api/contract'
-import { DEFAULT_BASE_URL, type Provider, type TestResult } from '@shared/types'
+import {
+  AGY_LOCAL_API_KEY,
+  AGY_LOCAL_BASE_URL,
+  DEFAULT_BASE_URL,
+  type Provider,
+  type TestResult
+} from '@shared/types'
 import { api } from '../../lib/bridge'
 import { useStore } from '../../store'
 import { useT } from '../../lib/i18n'
@@ -99,6 +105,16 @@ export function AddCredentialDialog({
   }
   const switchMethod = (m: Method): void => {
     setMethod(m)
+    setTestResult(null)
+    void cancelOAuth()
+  }
+
+  const useAgyLocal = (): void => {
+    setProvider('openai')
+    setMethod('apikey')
+    setName('AGY Local')
+    setBaseUrl(AGY_LOCAL_BASE_URL)
+    setApiKey(AGY_LOCAL_API_KEY)
     setTestResult(null)
     void cancelOAuth()
   }
@@ -203,6 +219,16 @@ export function AddCredentialDialog({
             ]}
           />
         </div>
+      </div>
+
+      <div className="rounded-[10px] border-2 border-dashed border-ink/25 p-3">
+        <div className="mb-2 text-sm font-semibold">AGY Local API</div>
+        <div className="mb-2 text-xs leading-relaxed opacity-65">
+          Use a local OpenAI-compatible AGY bridge. Default: {AGY_LOCAL_BASE_URL}. You can edit the address or key after applying the preset.
+        </div>
+        <DoodleButton variant="default" onClick={useAgyLocal}>
+          Use AGY Local
+        </DoodleButton>
       </div>
 
       {method === 'apikey' ? (
