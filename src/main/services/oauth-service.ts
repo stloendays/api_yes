@@ -7,9 +7,11 @@ import { normalizeSameApiKeyState, toCredentialView, type OAuthTokens, type Stor
 import { beginAnthropicAuth, exchangeAnthropicCode, splitPastedCode } from './oauth/anthropic-oauth'
 import { beginOpenAIAuth, exchangeOpenAICode, OPENAI_OAUTH } from './oauth/openai-oauth'
 import type { Pkce } from './oauth/pkce'
+import { launchAntigravityLogin, testAntigravityCli } from './provider/antigravity-cli'
 import { mt } from './i18n'
 
 const CODEX_BASE = 'https://chatgpt.com/backend-api/codex'
+const AGY_LOCAL_BASE = 'agy://official-cli'
 const SESSION_TTL_MS = 5 * 60_000
 
 interface OAuthSession {
@@ -17,9 +19,10 @@ interface OAuthSession {
   provider: Provider
   name?: string
   mode: 'loopback' | 'paste'
-  pkce: Pkce
+  pkce?: Pkce
   loopback?: Server
   timer?: ReturnType<typeof setTimeout>
+  poller?: ReturnType<typeof setInterval>
 }
 
 const RESULT_HTML = (ok: boolean, msg: string): string => `<!doctype html><html><head>
@@ -41,12 +44,20 @@ export function registerOAuthService(core: AppCore): void {
   const createCredential = (provider: Provider, name: string | undefined, tokens: OAuthTokens): StoredCredential => {
     const now = Date.now()
     const order = core.store.data.credentials.reduce((m, c) => Math.max(m, c.order), -1) + 1
+    const defaultName =
+      provider === 'anthropic'
+        ? mt('name.claudeSub')
+        : provider === 'antigravity'
+          ? 'AGY / Antigravity'
+          : mt('name.chatgptSub')
+    const baseUrl =
+      provider === 'anthropic' ? 'https://api.anthropic.com' : provider === 'antigravity' ? AGY_LOCAL_BASE : CODEX_BASE
     const cred: StoredCredential = {
       id: randomUUID(),
-      name: name?.trim() || (provider === 'anthropic' ? mt('name.claudeSub') : mt('name.chatgptSub')),
+      name: name?.trim() || defaultName,
       provider,
       kind: 'oauth',
-      baseUrl: provider === 'anthropic' ? 'https://api.anthropic.com' : CODEX_BASE,
+      baseUrl,
       oauth: tokens,
       enabled: true,
       createdAt: now,
@@ -63,12 +74,15 @@ export function registerOAuthService(core: AppCore): void {
 
   const cleanup = (s: OAuthSession): void => {
     if (s.timer) clearTimeout(s.timer)
+    if (s.poller) clearInterval(s.poller)
     if (s.loopback) s.loopback.close()
     sessions.delete(s.id)
   }
 
   // ── loopback capture (OpenAI) ──────────────────────────────────────────────
   const startLoopback = (s: OAuthSession): void => {
+    const pkce = s.pkce
+    if (!pkce) throw new Error('Missing OAuth PKCE state')
     const srv = createServer((req, res) => {
       const u = new URL(req.url ?? '/', `http://localhost:${OPENAI_OAUTH.redirectPort}`)
       if (!u.pathname.startsWith('/auth/callback')) {
@@ -83,9 +97,9 @@ export function registerOAuthService(core: AppCore): void {
         try {
           if (error) throw new Error(error)
           if (!code) throw new Error(mt('oauth.missingCode'))
-          if (state && state !== s.pkce.state) throw new Error(mt('oauth.stateMismatch'))
+          if (state && state !== pkce.state) throw new Error(mt('oauth.stateMismatch'))
           core.broadcast('oauth.status', { sessionId: s.id, phase: 'exchanging' })
-          const tokens = await exchangeOpenAICode({ code, verifier: s.pkce.verifier })
+          const tokens = await exchangeOpenAICode({ code, verifier: pkce.verifier })
           const cred = createCredential('openai', s.name, tokens)
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
           res.end(RESULT_HTML(true, mt('oauth.connectedChatgpt')))
@@ -108,12 +122,42 @@ export function registerOAuthService(core: AppCore): void {
       core.broadcast('oauth.status', { sessionId: s.id, phase: 'error', message })
       cleanup(s)
     })
-    // bind dual-stack (covers both 127.0.0.1 and ::1 that "localhost" may resolve to)
     srv.listen(OPENAI_OAUTH.redirectPort)
     s.loopback = srv
   }
 
-  core.commands.register('oauth.begin', ({ provider, name }) => {
+  // ── AGY browser sign-in via the official CLI ──────────────────────────────
+  const finishAgyIfReady = async (s: OAuthSession): Promise<boolean> => {
+    const r = await testAntigravityCli()
+    if (!r.ok) return false
+    const cred = createCredential('antigravity', s.name, {
+      // Deliberately not the upstream Google token: the official AGY CLI owns that secret in the OS keyring.
+      accessToken: 'managed-by-official-agy-cli',
+      account: { plan: 'AGY CLI OAuth' },
+      extra: { authManagedBy: 'agy-cli' }
+    })
+    core.broadcast('oauth.status', { sessionId: s.id, phase: 'success', credentialId: cred.id })
+    cleanup(s)
+    return true
+  }
+
+  const startAgyLogin = async (s: OAuthSession): Promise<void> => {
+    // Already signed in: complete without opening another terminal.
+    if (await finishAgyIfReady(s)) return
+    await launchAntigravityLogin()
+    let checking = false
+    s.poller = setInterval(() => {
+      if (checking || !sessions.has(s.id)) return
+      checking = true
+      void finishAgyIfReady(s)
+        .catch(() => false)
+        .finally(() => {
+          checking = false
+        })
+    }, 2000)
+  }
+
+  core.commands.register('oauth.begin', async ({ provider, name }) => {
     const id = randomUUID()
     if (provider === 'anthropic') {
       const handle = beginAnthropicAuth()
@@ -122,6 +166,31 @@ export function registerOAuthService(core: AppCore): void {
       sessions.set(id, s)
       void shell.openExternal(handle.url)
       return { sessionId: id, authUrl: handle.url, mode: 'paste' as const }
+    }
+    if (provider === 'antigravity') {
+      const s: OAuthSession = { id, provider, name, mode: 'loopback' }
+      s.timer = setTimeout(() => {
+        core.broadcast('oauth.status', {
+          sessionId: id,
+          phase: 'error',
+          message: 'AGY sign-in timed out. Complete the browser sign-in from the AGY terminal and try again.'
+        })
+        cleanup(s)
+      }, SESSION_TTL_MS)
+      sessions.set(id, s)
+      // Return first so the renderer can attach its status listener before a fast existing-session check succeeds.
+      setTimeout(() => {
+        void startAgyLogin(s).catch((e) => {
+          const message = e instanceof Error ? e.message : String(e)
+          core.broadcast('oauth.status', { sessionId: id, phase: 'error', message })
+          cleanup(s)
+        })
+      }, 100)
+      return {
+        sessionId: id,
+        authUrl: 'https://antigravity.google/docs/cli/install/',
+        mode: 'loopback' as const
+      }
     }
     const handle = beginOpenAIAuth()
     const s: OAuthSession = { id, provider, name, mode: 'loopback', pkce: handle.pkce }
@@ -135,7 +204,7 @@ export function registerOAuthService(core: AppCore): void {
   core.commands.register('oauth.submitCode', async ({ sessionId, code }): Promise<TestResult> => {
     const s = sessions.get(sessionId)
     if (!s) return { ok: false, at: Date.now(), message: mt('oauth.sessionExpired') }
-    if (s.mode !== 'paste') return { ok: false, at: Date.now(), message: mt('oauth.noPasteNeeded') }
+    if (s.mode !== 'paste' || !s.pkce) return { ok: false, at: Date.now(), message: mt('oauth.noPasteNeeded') }
     try {
       core.broadcast('oauth.status', { sessionId, phase: 'exchanging' })
       const { code: rawCode, state } = splitPastedCode(code)
